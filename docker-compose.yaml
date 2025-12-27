@@ -1,0 +1,92 @@
+version: '3'
+
+services:
+  # --- 1. The Database ---
+  postgres:
+    image: postgres:13
+    container_name: legal_db
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=legal_eagle
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "user"]
+      interval: 5s
+      retries: 5
+
+  # --- 2. The Vector DB ---
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: chroma_db
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+
+  # --- 3. Airflow Init ---
+  airflow-init:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://user:password@postgres/legal_eagle
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create --username admin --firstname Peter --lastname Parker --role Admin --email spiderman@avengers.com --password admin
+      "
+
+  # --- 4. Airflow Webserver ---
+  airflow-webserver:
+    build: .
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://user:password@postgres/legal_eagle
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./data_pipeline:/opt/airflow/data_pipeline
+      - ./raw_data:/opt/airflow/raw_data
+      # 👇 NEW: Map your local model cache to the container
+      - ~/.cache/chroma:/home/airflow/.cache/chroma
+    command: webserver
+
+  # --- 5. Airflow Scheduler ---
+  airflow-scheduler:
+    build: .
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://user:password@postgres/legal_eagle
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./data_pipeline:/opt/airflow/data_pipeline
+      - ./raw_data:/opt/airflow/raw_data
+      # 👇 NEW: Map your local model cache to the container (CRITICAL for execution)
+      - ~/.cache/chroma:/home/airflow/.cache/chroma
+    command: scheduler
+
+volumes:
+  postgres_data:
+  chroma_data:

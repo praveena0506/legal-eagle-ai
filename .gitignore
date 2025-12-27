@@ -1,0 +1,7 @@
+__pycache__/
+.venv/
+.idea/
+.vscode/
+data_pipeline/raw_data/
+data_pipeline/processed_data.pt
+logs/
