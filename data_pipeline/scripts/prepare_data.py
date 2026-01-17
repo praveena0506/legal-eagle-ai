@@ -1,106 +1,109 @@
-import os
 import torch
-from pathlib import Path
+import os
 import re
+from pathlib import Path
+from collections import Counter
 
-# --- Configuration ---
-MAX_LEN = 512  # Maximum words per case (truncates longer ones)
-VOCAB_SIZE = 10000  # Size of the dictionary
-SAVE_PATH = Path("../processed_data.pt")  # Saves to data_pipeline/processed_data.pt
-
-
-class SimpleTokenizer:
-    def __init__(self, vocab_size=10000):
-        self.vocab = {"<PAD>": 0, "<UNK>": 1}
-        self.vocab_size = vocab_size
-
-    def fit(self, texts):
-        print("📊 Building vocabulary...")
-        word_counts = {}
-        for text in texts:
-            words = text.lower().split()
-            for word in words:
-                word_counts[word] = word_counts.get(word, 0) + 1
-
-        # Sort by frequency and take top N words
-        sorted_words = sorted(word_counts.items(), key=lambda item: item[1], reverse=True)
-
-        for word, _ in sorted_words[:self.vocab_size - 2]:
-            if word not in self.vocab:
-                self.vocab[word] = len(self.vocab)
-
-        print(f"✅ Vocabulary built with {len(self.vocab)} words.")
-
-    def encode(self, text):
-        tokens = [self.vocab.get(w, 1) for w in text.lower().split()]  # 1 is UNK
-
-        # Padding / Truncating
-        if len(tokens) < MAX_LEN:
-            tokens = tokens + [0] * (MAX_LEN - len(tokens))  # Pad with 0
-        else:
-            tokens = tokens[:MAX_LEN]  # Truncate
-
-        return tokens
+# --- PATHS ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+ACCEPTED_DIR = BASE_DIR / "raw_data" / "appeal_accepted"
+REJECTED_DIR = BASE_DIR / "raw_data" / "appeal_rejected"
+PROCESSED_FILE = BASE_DIR / "processed_data.pt"
 
 
+# 👇 THIS IS THE MISSING FUNCTION
 def clean_text(text):
-    # Remove special characters but keep spaces
-    text = re.sub(r'[^a-zA-Z0-9\s]', '', text)
+    """
+    Simple text cleaning: Lowercase and remove special characters.
+    """
+    text = str(text).lower()
+    # Keep only letters and numbers
+    text = re.sub(r'[^a-z0-9\s]', '', text)
     return text
 
 
-def process_data():
-    base_path = Path("../raw_data")
-    class_1_path = base_path / "appeal_accepted"
-    class_0_path = base_path / "appeal_rejected"
+class SimpleTokenizer:
+    def __init__(self, vocab_size=1000):
+        self.vocab_size = vocab_size
+        self.vocab = {"<PAD>": 0, "<UNK>": 1}
+
+    def build_vocab(self, texts):
+        print("📊 Building Vocabulary...")
+        all_words = []
+        for text in texts:
+            # We use the same cleaning logic here
+            cleaned = clean_text(text)
+            tokens = cleaned.split()
+            all_words.extend(tokens)
+
+        # Keep top N most common words
+        most_common = Counter(all_words).most_common(self.vocab_size - 2)
+
+        for idx, (word, _) in enumerate(most_common):
+            self.vocab[word] = idx + 2  # Start after PAD and UNK
+
+        print(f"✅ Vocab built with {len(self.vocab)} words.")
+
+    def encode(self, text, max_len=512):
+        cleaned = clean_text(text)
+        tokens = cleaned.split()
+        token_ids = [self.vocab.get(t, 1) for t in tokens[:max_len]]
+
+        # Padding
+        if len(token_ids) < max_len:
+            token_ids += [0] * (max_len - len(token_ids))
+
+        return token_ids
+
+
+def run_data_preparation():
+    print("⚙️ Starting Data Preparation...")
 
     texts = []
     labels = []
 
-    print("📂 Reading files from disk...")
+    # 1. Read Accepted Cases (Label = 1)
+    if ACCEPTED_DIR.exists():
+        for f in ACCEPTED_DIR.glob("*.txt"):
+            try:
+                with open(f, "r", encoding="utf-8") as file:
+                    texts.append(file.read())
+                    labels.append(1)
+            except Exception:
+                pass  # Skip bad files
 
-    # Read Class 1 (Accepted)
-    if class_1_path.exists():
-        files = list(class_1_path.glob("*.txt"))
-        print(f"   Found {len(files)} Accepted cases.")
-        for file in files:
-            with open(file, "r", encoding="utf-8") as f:
-                texts.append(clean_text(f.read()))
-                labels.append(1)
+    # 2. Read Rejected Cases (Label = 0)
+    if REJECTED_DIR.exists():
+        for f in REJECTED_DIR.glob("*.txt"):
+            try:
+                with open(f, "r", encoding="utf-8") as file:
+                    texts.append(file.read())
+                    labels.append(0)
+            except Exception:
+                pass
 
-    # Read Class 0 (Rejected)
-    if class_0_path.exists():
-        files = list(class_0_path.glob("*.txt"))
-        print(f"   Found {len(files)} Rejected cases.")
-        for file in files:
-            with open(file, "r", encoding="utf-8") as f:
-                texts.append(clean_text(f.read()))
-                labels.append(0)
-
-    if len(texts) == 0:
-        print("❌ Error: No data found. Run fetch_real_data.py first!")
+    if not texts:
+        print("❌ No data found in raw_data folders! Run the Scraper/Auto-Labeler first.")
         return
 
-    # Tokenize
-    tokenizer = SimpleTokenizer(vocab_size=VOCAB_SIZE)
-    tokenizer.fit(texts)
+    # 3. Tokenize
+    tokenizer = SimpleTokenizer(vocab_size=2000)
+    tokenizer.build_vocab(texts)
 
-    print("🔢 Converting text to tensors...")
-    input_ids = [tokenizer.encode(t) for t in texts]
+    input_ids = []
+    for text in texts:
+        input_ids.append(tokenizer.encode(text))
 
-    # Convert to PyTorch Tensors
-    data_tensor = torch.tensor(input_ids, dtype=torch.long)
-    label_tensor = torch.tensor(labels, dtype=torch.long)
+    # 4. Save
+    data_bundle = {
+        "vocab": tokenizer.vocab,
+        "data": torch.tensor(input_ids, dtype=torch.long),
+        "labels": torch.tensor(labels, dtype=torch.long)
+    }
 
-    # Save to disk
-    torch.save({
-        "data": data_tensor,
-        "labels": label_tensor,
-        "vocab": tokenizer.vocab
-    }, SAVE_PATH)
-
-    print(f"💾 Saved processed data to {SAVE_PATH}")
+    torch.save(data_bundle, PROCESSED_FILE)
+    print(f"💾 Saved processed data to {PROCESSED_FILE}")
 
 
 if __name__ == "__main__":
-    process_data()
+    run_data_preparation()
