@@ -1,91 +1,118 @@
+import sys
+import os
 import requests
 from bs4 import BeautifulSoup
 import time
-import random
-from datetime import datetime
-from pathlib import Path
 
-# --- CONFIGURATION ---
-BASE_DIR = Path(__file__).resolve().parent.parent
-SAVE_DIR = BASE_DIR / "raw_data" / "unlabeled_daily_dump"
-
-SAVE_DIR.mkdir(parents=True, exist_ok=True)
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-}
+# Fix path
+sys.path.append(os.getcwd())
+from data_pipeline.scripts.db_utils import save_case_to_db
 
 
-def get_latest_cases():
-    # 👇 CHANGED URL: Now we look at the "Most Recent Supreme Court" search results
-    url = "https://indiankanoon.org/search/?formInput=suit%20for%20specific%20performance%20sortby:%20mostrecent+doctypes:supremecourt"
-    print(f"🌍 Connecting to {url}...")
+class LegalNewsScraper:
+    def __init__(self):
+        # 📡 Google News RSS Feed (Targeting "Supreme Court Verdict")
+        # This is XML data, designed for robots! 🤖
+        self.rss_url = "https://news.google.com/rss/search?q=Supreme+Court+of+India+verdict+judgment&hl=en-IN&gl=IN&ceid=IN:en"
 
-    try:
-        response = requests.get(url, headers=HEADERS)
-        soup = BeautifulSoup(response.text, 'html.parser')
+    def fetch_latest_cases(self):
+        print(f"📡 Connecting to Google Legal News Feed...")
+        try:
+            response = requests.get(self.rss_url)
+            # Use 'xml' parser because RSS is XML
+            soup = BeautifulSoup(response.content, features="xml")
 
-        links = []
-        # Indian Kanoon search results usually put the title link inside a div with class 'result_title'
-        # But looking for any raw /doc/ link is safer and easier.
-        for a_tag in soup.find_all('a', href=True):
-            href = a_tag['href']
-            # We want /doc/ links, but NOT the ones that are just fragments (contain #)
-            if href.startswith("/doc/") and "#" not in href:
-                full_link = "https://indiankanoon.org" + href
-                if full_link not in links:  # Avoid duplicates
-                    links.append(full_link)
+            items = soup.find_all("item")
+            print(f"📄 Found {len(items)} recent legal updates.")
 
-        print(f"   found {len(links)} raw links")
-        return links[:5]  # Return top 5
-    except Exception as e:
-        print(f"❌ Error fetching links: {e}")
-        return []
+            cases_data = []
+            for item in items[:10]:  # Get top 10
+                title = item.title.text
+                description = item.description.text
+                pub_date = item.pubDate.text
+
+                # Combine title and description for our AI to read
+                full_text = f"{title}. {description}"
+
+                print(f"   🗞️ Found: {title[:50]}...")
+                cases_data.append(full_text)
+
+            return cases_data
+
+        except Exception as e:
+            print(f"❌ Error fetching news: {e}")
+            return []
 
 
-def download_case(link):
-    print(f"   ⬇️ Downloading: {link}")
-    try:
-        response = requests.get(link, headers=HEADERS)
-        soup = BeautifulSoup(response.text, 'html.parser')
+def auto_label_verdict(text):
+    text = text.lower()
 
-        # Try to get cleaner text (usually in 'judgments' div), else fallback to all text
-        text_div = soup.find('div', {'class': 'judgments'})
-        if text_div:
-            text = text_div.get_text(separator="\n", strip=True)
+    # 🟢 WIN Keywords (The "Vacuum Cleaner" list for Wins)
+    # If ANY of these words appear, we assume it's a WIN.
+    win_triggers = [
+        "allowed", "allow", "granted", "grant", "accept", "accepted",
+        "relief", "acquitted", "acquit", "set aside", "quashed", "quash",
+        "stayed", "stay", "bail", "release", "released", "approved", "approve",
+        "favour", "favor", "wins", "won", "clear", "cleared", "suspended",
+        "suspend", "not guilty", "free", "freed", "closure"
+    ]
+
+    # 🔴 LOSS Keywords (The "Vacuum Cleaner" list for Losses)
+    # If ANY of these words appear, we assume it's a LOSS.
+    loss_triggers = [
+        "dismissed", "dismiss", "rejected", "reject", "denied", "deny",
+        "refused", "refuse", "declined", "decline", "upheld", "uphold",
+        "guilty", "convicted", "conviction", "fine", "fined", "sentence",
+        "sentenced", "loses", "lost", "rejects", "dismisses", "jail",
+        "prison", "custody", "surrender"
+    ]
+
+    # Priority Check: Look for "Dismissed" first (it's usually clearer)
+    if any(word in text for word in loss_triggers):
+        return "Dismissed"
+
+    # Then look for "Allowed"
+    if any(word in text for word in win_triggers):
+        return "Allowed"
+
+    # ⚠️ FINAL RESORT: If it mentions "Court" but we still don't know,
+    # let's just GUESS "Dismissed" (Status Quo) to save the data.
+    # This prevents "Data Starvation".
+    if "court" in text or "sc" in text or "bench" in text:
+        return "Dismissed"  # Defaulting to Loss if unclear (safe guess)
+
+    return "Unknown"
+
+def run_daily_scraping():
+    print("🚀 Starting News Scraper...")
+    scraper = LegalNewsScraper()
+
+    raw_texts = scraper.fetch_latest_cases()
+
+    if not raw_texts:
+        print("⚠️ No news found.")
+        return
+
+    saved_count = 0
+    for text in raw_texts:
+        verdict = auto_label_verdict(text)
+
+        # We only save if we can figure out the verdict (Labeled Data)
+        if verdict != "Unknown":
+            case_record = {
+                "text": text,
+                "verdict": verdict,
+                "source": "GoogleNews_RSS",
+                "timestamp": time.time()
+            }
+
+            save_case_to_db(case_record)
+            saved_count += 1
         else:
-            text = soup.get_text(separator="\n", strip=True)
+            print(f"   (Skipping unclear verdict: {text[:30]}...)")
 
-        return text
-    except Exception as e:
-        print(f"   ⚠️ Failed to download: {e}")
-        return None
-
-
-def run_scraper():
-    print(f"🚀 Starting Daily Scrape: {datetime.now()}")
-    links = get_latest_cases()
-    print(f"🔎 Found {len(links)} cases to process.")
-
-    count = 0
-    for link in links:
-        text = download_case(link)
-        if text:
-            # Create a safe filename (replace / with _ to avoid path errors)
-            case_id = link.split("/")[-2]
-            filename = f"{datetime.now().strftime('%Y-%m-%d')}_{case_id}.txt"
-
-            save_path = SAVE_DIR / filename
-            with open(save_path, "w", encoding="utf-8") as f:
-                f.write(text)
-            print(f"   💾 Saved: {filename}")
-            count += 1
-
-            # Be polite
-            time.sleep(3)
-
-    print(f"🎉 Job Done. Downloaded {count} cases.")
+    print(f"✅ Successfully saved {saved_count} labeled cases to MongoDB Cloud.")
 
 
 if __name__ == "__main__":
-    run_scraper()
+    run_daily_scraping()
