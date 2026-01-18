@@ -67,10 +67,7 @@ Poetry
 
 1. Clone the Repository
 
-Bash
 
-git clone https://github.com/yourusername/legal-eagle-ai.git
-cd legal-eagle-ai
 2. Install Dependencies (via Poetry)
 
 Bash
